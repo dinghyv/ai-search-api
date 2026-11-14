@@ -1,5 +1,7 @@
 import asyncio
-from fastapi import APIRouter, Cookie, HTTPException, Request, Response
+import hmac
+import os
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -10,8 +12,21 @@ router = APIRouter(prefix="/admin", tags=["Admin Console"])
 COOKIE_NAME = "search_admin_session"
 
 
-def _require_admin(session_cookie: str | None) -> str:
-    username = db.verify_session_token(session_cookie or "")
+def _require_admin(
+    request: Request,
+    search_admin_session: str | None = Cookie(default=None),
+) -> str:
+    admin_token = os.environ.get("ADMIN_TOKEN", "").strip()
+    if admin_token:
+        header_token = request.headers.get("x-admin-token", "").strip()
+        if not header_token:
+            auth = request.headers.get("authorization", "")
+            if auth.lower().startswith("bearer "):
+                header_token = auth[7:].strip()
+        if header_token and hmac.compare_digest(header_token, admin_token):
+            return "external-admin-token"
+
+    username = db.verify_session_token(search_admin_session or "")
     if not username:
         raise HTTPException(status_code=401, detail="请先登录管理员账号")
     return username
@@ -84,9 +99,10 @@ async def admin_logout(response: Response):
 @router.post("/api/password", include_in_schema=False)
 async def change_password(
     payload: PasswordPayload,
-    search_admin_session: str | None = Cookie(default=None),
+    user: str = Depends(_require_admin),
 ):
-    user = _require_admin(search_admin_session)
+    if user == "external-admin-token":
+        raise HTTPException(status_code=400, detail="外部 Token 鉴权不支持修改本地管理员密码")
     try:
         db.update_admin_password(user, payload.new_password)
     except ValueError as exc:
@@ -95,8 +111,7 @@ async def change_password(
 
 
 @router.get("/api/dashboard", include_in_schema=False)
-async def admin_dashboard(search_admin_session: str | None = Cookie(default=None)):
-    _require_admin(search_admin_session)
+async def admin_dashboard(_user: str = Depends(_require_admin)):
     return {
         "stats": db.get_stats(),
         "keys": db.list_api_keys(),
@@ -113,9 +128,8 @@ async def admin_dashboard(search_admin_session: str | None = Cookie(default=None
 @router.post("/api/keys", include_in_schema=False)
 async def create_key(
     payload: CreateKeyPayload,
-    search_admin_session: str | None = Cookie(default=None),
+    _user: str = Depends(_require_admin),
 ):
-    _require_admin(search_admin_session)
     return db.create_api_key(payload.name)
 
 
@@ -123,9 +137,8 @@ async def create_key(
 async def toggle_key(
     key_id: int,
     payload: ToggleKeyPayload,
-    search_admin_session: str | None = Cookie(default=None),
+    _user: str = Depends(_require_admin),
 ):
-    _require_admin(search_admin_session)
     db.toggle_api_key(key_id, payload.is_active)
     return {"ok": True}
 
@@ -133,9 +146,8 @@ async def toggle_key(
 @router.delete("/api/keys/{key_id}", include_in_schema=False)
 async def remove_key(
     key_id: int,
-    search_admin_session: str | None = Cookie(default=None),
+    _user: str = Depends(_require_admin),
 ):
-    _require_admin(search_admin_session)
     db.delete_api_key(key_id)
     return {"ok": True}
 
@@ -143,9 +155,8 @@ async def remove_key(
 @router.post("/api/settings", include_in_schema=False)
 async def save_settings(
     payload: SettingsPayload,
-    search_admin_session: str | None = Cookie(default=None),
+    _user: str = Depends(_require_admin),
 ):
-    _require_admin(search_admin_session)
     # 校验引擎是否存在
     get_engine(payload.default_engine)
     db.set_setting("require_api_key", "1" if payload.require_api_key else "0")
@@ -160,9 +171,8 @@ async def test_search(
     engine: str = "so_qq",
     page: int = 1,
     limit: int = 5,
-    search_admin_session: str | None = Cookie(default=None),
+    _user: str = Depends(_require_admin),
 ):
-    _require_admin(search_admin_session)
     eng = get_engine(engine)
     return await asyncio.to_thread(eng.search, query=q.strip(), page=page, limit=limit)
 
